@@ -7,6 +7,9 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v1.3.3
+//  - A touch smaller: 38px high (was 40) and 3px bottom margin (was 8), so
+//    the gap to the SoundCloud player below is a few px tighter.
 // v1.3.2
 //  - Same footprint as the minimised SoundCloud player: 40px high (6px
 //    padding, like the mini player), right-hand icon column lined up with the
@@ -48,7 +51,7 @@
 (() => {
   "use strict";
 
-  const ANKI_WIDGET_VERSION = "1.3.2";
+  const ANKI_WIDGET_VERSION = "1.3.3";
   const ENDPOINT = "https://ankiweb.net/svc/decks/deck-list-info";
   const DECKS_PAGE = "https://ankiweb.net/decks";
 
@@ -238,7 +241,7 @@
         position: relative; display: flex; align-items: center; gap: 10px;
         flex-shrink: 0; min-width: 0; max-width: calc(100% - 16px);
         contain: inline-size; overflow: hidden;
-        margin: 6px 8px 8px; padding: 6px 8px 6px 12px; box-sizing: border-box; min-height: 40px;
+        margin: 6px 8px 3px; padding: 5px 8px 5px 12px; box-sizing: border-box; min-height: 38px;
         -moz-window-dragging: no-drag; cursor: pointer;
         background: transparent;
         backdrop-filter: blur(14px) saturate(160%);
@@ -297,9 +300,9 @@
       #anki-widget .anki-sub:empty { display: none; }
 
       /* No "+N new" line: put the label on the baseline of the number ("102 due"). */
-      /* (extra vertical padding keeps the line centred in the 40px minimum height) */
+      /* (extra vertical padding keeps the line centred in the 38px minimum height) */
       #anki-widget.anki-single:not(.anki-settings-open) {
-        align-items: baseline; padding-top: 9px; padding-bottom: 9px;
+        align-items: baseline; padding-top: 8px; padding-bottom: 8px;
       }
 
       /* flashcard glyph at the right edge; swaps with the buttons on hover */
