@@ -3,7 +3,7 @@
   "name": "Anki Widget",
   "description": "Shows how many Anki cards are due (from AnkiWeb) in the Zen sidebar.",
   "author": "tidex",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "scripts": {
     "anki-widget.uc.js": {
       "name": "Core script",

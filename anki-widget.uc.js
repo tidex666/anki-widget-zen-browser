@@ -7,6 +7,14 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v1.1.0
+//  - Hover: the tint and the brighter rim now live on pseudo-elements that
+//    inherit the radius, so the corners stay clean (changing the background
+//    of the blurred root itself left ugly corners).
+//  - Refresh button is hidden until hover and floats over the right edge
+//    instead of taking space, so the text ("+48 new") is no longer cut off.
+//  - Zero due and no new cards shows "all done"; tooltip shows last update.
+//  - Always mounts ABOVE the SoundCloud widget, whatever loads first.
 // v1.0.0
 //  - First version. Shows how many cards are due (review + learning) and how
 //    many new cards are available today, read from AnkiWeb, so desktop Anki
@@ -16,7 +24,7 @@
 (() => {
   "use strict";
 
-  const ANKI_WIDGET_VERSION = "1.0.0";
+  const ANKI_WIDGET_VERSION = "1.1.0";
   const ENDPOINT = "https://ankiweb.net/svc/decks/deck-list-info";
   const DECKS_PAGE = "https://ankiweb.net/decks";
 
@@ -108,6 +116,7 @@
     // ---- Palette (same neutral glass/mica palette as the SoundCloud widget) ----
     const COL_TEXT = "#f4f4f5";
     const COL_SELECTION = "rgba(255, 255, 255, 0.14)";
+    const COL_SURFACE = "rgba(255, 255, 255, 0.08)";
     const COL_SURFACE_SOFT = "rgba(255, 255, 255, 0.05)";
     const COL_TEXT_DIM = "rgba(255, 255, 255, 0.74)";
     const COL_TEXT_FAINT = "rgba(255, 255, 255, 0.50)";
@@ -154,7 +163,17 @@
         mask-composite: exclude;
       }
       #anki-widget *::selection { background-color: ${COL_SELECTION}; color: ${COL_TEXT}; }
-      #anki-widget:hover { background-color: ${COL_SURFACE_SOFT}; }
+      /* Hover = a soft tint layer behind the content + a brighter rim. Both are
+         pseudo-elements with inherited radius, so the corners stay clean. */
+      #anki-widget::after {
+        content: ""; position: absolute; inset: 0; border-radius: inherit;
+        z-index: -1; pointer-events: none;
+        background: rgba(255, 255, 255, 0.06);
+        opacity: 0; transition: opacity 0.15s ease;
+      }
+      #anki-widget:hover::after { opacity: 1; }
+      #anki-widget::before { transition: background-color 0.15s ease; }
+      #anki-widget:hover::before { background: rgba(255, 255, 255, 0.20); }
       #anki-widget.anki-narrow { display: none !important; }
 
       #anki-widget .anki-num {
@@ -171,17 +190,25 @@
       #anki-widget .anki-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
       #anki-widget .anki-sub:empty { display: none; }
 
+      /* On hover the end of the text fades out under the refresh button
+         (no layout shift; short texts never reach that area). */
+      #anki-widget:hover .anki-text {
+        mask-image: linear-gradient(90deg, #000 calc(100% - 38px), transparent calc(100% - 26px));
+      }
+
       #anki-widget .anki-refresh {
-        appearance: none; border: none; margin: 0; padding: 0;
+        position: absolute; right: 8px; top: 50%; margin-top: -11px;
+        appearance: none; border: none; padding: 0;
         font: inherit; color: inherit; cursor: pointer; -moz-window-dragging: no-drag;
         display: flex; align-items: center; justify-content: center;
-        width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0;
-        background-color: ${COL_SURFACE_SOFT}; opacity: 0.4;
-        transition: background-color 0.12s ease, transform 0.08s ease, opacity 0.15s ease;
+        width: 22px; height: 22px; border-radius: 50%;
+        background-color: ${COL_SURFACE};
+        opacity: 0; transform: scale(0.85); pointer-events: none;
+        transition: opacity 0.15s ease, transform 0.15s ease, background-color 0.12s ease;
       }
-      #anki-widget:hover .anki-refresh { opacity: 1; }
+      #anki-widget:hover .anki-refresh { opacity: 1; transform: none; pointer-events: auto; }
       #anki-widget .anki-refresh:hover { background-color: ${COL_SELECTION}; }
-      #anki-widget .anki-refresh:active { transform: scale(0.94); }
+      #anki-widget:hover .anki-refresh:active { transform: scale(0.92); }
       #anki-widget.anki-loading .anki-refresh svg { animation: anki-spin 0.9s linear infinite; }
       @keyframes anki-spin { to { transform: rotate(360deg); } }
     `;
@@ -235,6 +262,7 @@
       const decks = parseDeckList(new Uint8Array(await res.arrayBuffer()));
       return {
         state: "ok",
+        at: Date.now(),
         decks,
         due: decks.reduce((n, d) => n + d.due, 0),
         fresh: decks.reduce((n, d) => n + d.fresh, 0),
@@ -250,11 +278,13 @@
         widgetDiv.dataset.state = r.due === 0 ? "done" : "ok";
         numEl.textContent = String(r.due);
         labelEl.textContent = "due";
-        subEl.textContent = r.fresh ? "+" + r.fresh + " new" : "";
+        subEl.textContent = r.fresh ? "+" + r.fresh + " new" : (r.due === 0 ? "all done" : "");
         const lines = r.decks
           .filter((d) => d.due || d.fresh)
           .map((d) => d.name + ": " + d.due + (d.fresh ? " (+" + d.fresh + " new)" : ""));
-        widgetDiv.title = ["Due: " + r.due + ", new: " + r.fresh]
+        let when = "";
+        try { when = new Date(r.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); } catch (e) {}
+        widgetDiv.title = ["Due: " + r.due + ", new: " + r.fresh + (when ? " (updated " + when + ")" : "")]
           .concat(lines)
           .concat(stale ? ["", "Could not refresh, showing the last values."] : [])
           .join("\n");
@@ -354,6 +384,10 @@
     function mountWidget() {
       const m = findMount();
       if (!m) return false;
+      // Always sit ABOVE the SoundCloud widget (if it is in the same container),
+      // no matter which script loaded first.
+      const sc = document.getElementById("sc-widget-test");
+      if (sc && sc.parentNode === m.parent) m.before = sc;
       if (widgetDiv.parentNode !== m.parent || widgetDiv.nextSibling !== m.before) {
         m.parent.insertBefore(widgetDiv, m.before);
         console.log("[ANKI-WIDGET] mounted into", m.parent.id || m.parent.tagName);
