@@ -7,6 +7,13 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v1.2.0
+//  - Settings (gear button, shown on hover): pick which decks count towards
+//    the due / new numbers. Unticked decks (and everything below them) are
+//    left out. Nothing is changed in Anki itself. The choice is stored in
+//    about:config "anki-widget.excluded" and shared between windows.
+//  - Explicit window-state check: no AnkiWeb requests while the browser
+//    window is minimised or hidden; it refreshes again as soon as it is back.
 // v1.1.0
 //  - Hover: the tint and the brighter rim now live on pseudo-elements that
 //    inherit the radius, so the corners stay clean (changing the background
@@ -24,7 +31,7 @@
 (() => {
   "use strict";
 
-  const ANKI_WIDGET_VERSION = "1.1.0";
+  const ANKI_WIDGET_VERSION = "1.2.0";
   const ENDPOINT = "https://ankiweb.net/svc/decks/deck-list-info";
   const DECKS_PAGE = "https://ankiweb.net/decks";
 
@@ -75,8 +82,30 @@
   //   message { field 1 = root { field 3 (repeated) = top-level deck } }
   //   deck: 2 = name, 6 = review count, 7 = learn count, 8 = new count,
   //         3 (repeated) = sub-decks. A deck's counts already include its
-  //         sub-decks, so only top-level decks are summed.
-  // AnkiWeb's "due" column is review + learn.
+  //         sub-decks. AnkiWeb's "due" column is review + learn.
+  // Decks are parsed into a tree; `path` is the full "Parent::Child" name
+  // and is what the deck selection in the settings is keyed on.
+  function parseDeck(bytes, parentPath) {
+    const deck = { name: "", path: "", due: 0, fresh: 0, children: [] };
+    let review = 0;
+    let learn = 0;
+    const subs = [];
+    for (const g of fields(bytes)) {
+      if (g.field === 2 && g.wire === 2) deck.name = new TextDecoder().decode(g.value);
+      else if (g.field === 6 && g.wire === 0) review = g.value;
+      else if (g.field === 7 && g.wire === 0) learn = g.value;
+      else if (g.field === 8 && g.wire === 0) deck.fresh = g.value;
+      else if (g.field === 3 && g.wire === 2) subs.push(g.value);
+    }
+    deck.due = review + learn;
+    // sub-deck names may come as the leaf only or as the full path
+    deck.path = parentPath && deck.name.indexOf(parentPath + "::") !== 0
+      ? parentPath + "::" + deck.name
+      : deck.name;
+    for (const sub of subs) deck.children.push(parseDeck(sub, deck.path));
+    return deck;
+  }
+
   function parseDeckList(bytes) {
     let root = null;
     for (const f of fields(bytes)) {
@@ -89,18 +118,7 @@
 
     const decks = [];
     for (const f of fields(root)) {
-      if (f.field !== 3 || f.wire !== 2) continue;
-      const deck = { name: "", due: 0, fresh: 0 };
-      let review = 0;
-      let learn = 0;
-      for (const g of fields(f.value)) {
-        if (g.field === 2 && g.wire === 2) deck.name = new TextDecoder().decode(g.value);
-        else if (g.field === 6 && g.wire === 0) review = g.value;
-        else if (g.field === 7 && g.wire === 0) learn = g.value;
-        else if (g.field === 8 && g.wire === 0) deck.fresh = g.value;
-      }
-      deck.due = review + learn;
-      decks.push(deck);
+      if (f.field === 3 && f.wire === 2) decks.push(parseDeck(f.value, ""));
     }
     return decks;
   }
@@ -114,6 +132,7 @@
     console.log("[ANKI-WIDGET] init v" + ANKI_WIDGET_VERSION);
 
     // ---- Palette (same neutral glass/mica palette as the SoundCloud widget) ----
+    const COL_BG = "#18181b";
     const COL_TEXT = "#f4f4f5";
     const COL_SELECTION = "rgba(255, 255, 255, 0.14)";
     const COL_SURFACE = "rgba(255, 255, 255, 0.08)";
@@ -127,9 +146,69 @@
     function getInt(n, d) {
       try { return Services.prefs.getIntPref(PREFIX + n, d); } catch (e) { return d; }
     }
+    function getStr(n, d) {
+      try { return Services.prefs.getStringPref(PREFIX + n, d); } catch (e) { return d; }
+    }
+    function setStr(n, v) {
+      try { Services.prefs.setStringPref(PREFIX + n, v); } catch (e) {}
+    }
     const REFRESH_MS = Math.max(1, getInt("refresh-minutes", 10)) * 60 * 1000;
     const STALE_MS = 2 * 60 * 1000;      // refresh on focus if older than this
     const RETRY_MS = 10 * 1000;          // ...or this, while logged out / failing
+
+    // Decks the user turned off (full paths). New decks are counted by default.
+    const excluded = new Set();
+    function loadExcluded() {
+      excluded.clear();
+      try {
+        const a = JSON.parse(getStr("excluded", "[]"));
+        if (Array.isArray(a)) for (const x of a) if (typeof x === "string") excluded.add(x);
+      } catch (e) {}
+    }
+    function saveExcluded() {
+      setStr("excluded", JSON.stringify(Array.from(excluded)));
+    }
+    loadExcluded();
+
+    // A deck's counts include its sub-decks, so for a deck that stays on but
+    // has switched-off sub-decks, their share is subtracted. (If Anki's daily
+    // limits cap the parent, this is an approximation.)
+    function effective(deck) {
+      if (excluded.has(deck.path)) return { due: 0, fresh: 0 };
+      let due = deck.due;
+      let fresh = deck.fresh;
+      for (const c of deck.children) {
+        const e = effective(c);
+        due -= c.due - e.due;
+        fresh -= c.fresh - e.fresh;
+      }
+      return { due: Math.max(0, due), fresh: Math.max(0, fresh) };
+    }
+    function totals(decks) {
+      let due = 0;
+      let fresh = 0;
+      for (const d of decks) {
+        const e = effective(d);
+        due += e.due;
+        fresh += e.fresh;
+      }
+      return { due, fresh };
+    }
+    function flatten(decks, out) {
+      for (const d of decks) {
+        out.push(d);
+        flatten(d.children, out);
+      }
+      return out;
+    }
+
+    // Minimised (or otherwise hidden) window: nothing is drawn, so no requests.
+    function windowHidden() {
+      try {
+        if (window.windowState === window.STATE_MINIMIZED) return true;
+      } catch (e) {}
+      return !!document.hidden;
+    }
 
     // =================== DOM ===================
     const widgetDiv = document.createElement("div");
@@ -175,6 +254,13 @@
       #anki-widget::before { transition: background-color 0.15s ease; }
       #anki-widget:hover::before { background: rgba(255, 255, 255, 0.20); }
       #anki-widget.anki-narrow { display: none !important; }
+      #anki-widget.anki-settings-open { cursor: default; }
+
+      /* ---- main view ---- */
+      #anki-widget.anki-settings-open .anki-num,
+      #anki-widget.anki-settings-open .anki-text,
+      #anki-widget.anki-settings-open .anki-actions { display: none !important; }
+      #anki-widget:not(.anki-settings-open) .anki-panel { display: none !important; }
 
       #anki-widget .anki-num {
         font-size: 22px; line-height: 1; font-weight: 600;
@@ -190,27 +276,87 @@
       #anki-widget .anki-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
       #anki-widget .anki-sub:empty { display: none; }
 
-      /* On hover the end of the text fades out under the refresh button
+      /* On hover the end of the text fades out under the buttons
          (no layout shift; short texts never reach that area). */
       #anki-widget:hover .anki-text {
-        mask-image: linear-gradient(90deg, #000 calc(100% - 38px), transparent calc(100% - 26px));
+        mask-image: linear-gradient(90deg, #000 calc(100% - 22px), transparent calc(100% - 12px));
       }
 
-      #anki-widget .anki-refresh {
-        position: absolute; right: 8px; top: 50%; margin-top: -11px;
-        appearance: none; border: none; padding: 0;
+      /* round flat buttons (gear, refresh, back) */
+      #anki-widget .anki-btn {
+        appearance: none; border: none; margin: 0; padding: 0;
         font: inherit; color: inherit; cursor: pointer; -moz-window-dragging: no-drag;
         display: flex; align-items: center; justify-content: center;
-        width: 22px; height: 22px; border-radius: 50%;
-        background-color: ${COL_SURFACE};
-        opacity: 0; transform: scale(0.85); pointer-events: none;
-        transition: opacity 0.15s ease, transform 0.15s ease, background-color 0.12s ease;
+        border-radius: 50%; flex-shrink: 0; background-color: ${COL_SURFACE};
+        transition: background-color 0.12s ease, transform 0.08s ease;
       }
-      #anki-widget:hover .anki-refresh { opacity: 1; transform: none; pointer-events: auto; }
-      #anki-widget .anki-refresh:hover { background-color: ${COL_SELECTION}; }
-      #anki-widget:hover .anki-refresh:active { transform: scale(0.92); }
+      #anki-widget .anki-btn:hover { background-color: ${COL_SELECTION}; }
+      #anki-widget .anki-btn:active { transform: scale(0.92); }
+
+      /* gear + refresh: stacked at the right edge, only visible on hover */
+      #anki-widget .anki-actions {
+        position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+        display: flex; flex-direction: column; gap: 2px;
+        opacity: 0; pointer-events: none; transition: opacity 0.15s ease;
+      }
+      #anki-widget:hover .anki-actions { opacity: 1; pointer-events: auto; }
+      #anki-widget .anki-actions .anki-btn { width: 16px; height: 16px; }
       #anki-widget.anki-loading .anki-refresh svg { animation: anki-spin 0.9s linear infinite; }
       @keyframes anki-spin { to { transform: rotate(360deg); } }
+
+      /* ---- settings panel ---- */
+      #anki-widget .anki-panel { display: flex; flex-direction: column; gap: 6px; flex: 1; width: 100%; min-width: 0; }
+      #anki-widget .anki-panel-head {
+        display: grid; grid-template-columns: 18px 1fr 18px; align-items: center; gap: 6px;
+      }
+      #anki-widget .anki-panel-head .anki-btn { width: 18px; height: 18px; }
+      #anki-widget .anki-panel-title { text-align: center; font-size: 12px; font-weight: 700; }
+      #anki-widget .anki-list {
+        display: flex; flex-direction: column; gap: 1px;
+        max-height: 190px; overflow-y: auto; overflow-x: hidden;
+        margin: 0 -6px; padding: 0 6px;
+        scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+      }
+      #anki-widget .anki-row {
+        display: flex; align-items: center; gap: 7px; min-width: 0;
+        padding: 4px 5px; border-radius: 8px; cursor: pointer;
+        transition: background-color 0.12s ease;
+      }
+      #anki-widget .anki-row:hover { background: ${COL_SURFACE}; }
+      #anki-widget .anki-row.anki-locked { opacity: 0.45; pointer-events: none; }
+      #anki-widget .anki-row-name {
+        flex: 1; min-width: 0; font-size: 11px; color: rgba(255, 255, 255, 0.88);
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      #anki-widget .anki-row.anki-off .anki-row-name { color: ${COL_TEXT_FAINT}; }
+      #anki-widget .anki-row-count {
+        flex-shrink: 0; font-size: 10px; color: ${COL_TEXT_FAINT}; font-variant-numeric: tabular-nums;
+      }
+      #anki-widget .anki-check {
+        display: flex; align-items: center; justify-content: center;
+        width: 13px; height: 13px; border-radius: 4px; flex-shrink: 0; box-sizing: border-box;
+        border: 1.5px solid ${COL_TEXT_FAINT};
+        transition: background-color 0.12s ease, border-color 0.12s ease;
+      }
+      #anki-widget .anki-check svg { opacity: 0; }
+      #anki-widget .anki-check.anki-on { background: ${COL_TEXT}; border-color: ${COL_TEXT}; }
+      #anki-widget .anki-check.anki-on svg { opacity: 1; }
+      #anki-widget .anki-empty {
+        padding: 14px 6px; text-align: center; color: ${COL_TEXT_FAINT};
+        font-size: 10.5px; line-height: 1.45; white-space: pre-line;
+      }
+      #anki-widget .anki-foot {
+        display: flex; align-items: center; justify-content: space-between; gap: 8px;
+        font-size: 9.5px; color: ${COL_TEXT_FAINT}; min-height: 20px;
+      }
+      #anki-widget .anki-pill {
+        appearance: none; border: none; margin: 0; padding: 0 9px; height: 20px;
+        border-radius: 10px; box-sizing: border-box; cursor: pointer; -moz-window-dragging: no-drag;
+        font: inherit; font-size: 10px; font-weight: 600; white-space: nowrap;
+        background: ${COL_SURFACE}; color: ${COL_TEXT_DIM};
+        transition: background-color 0.12s ease, color 0.12s ease;
+      }
+      #anki-widget .anki-pill:hover { background: ${COL_SELECTION}; color: ${COL_TEXT}; }
     `;
     widgetDiv.appendChild(styleTag);
 
@@ -221,6 +367,35 @@
       return n;
     }
 
+    function svgIcon(paths, size, stroke, sw) {
+      const svg = document.createElementNS(SVG_NS, "svg");
+      svg.setAttribute("viewBox", "0 0 24 24");
+      svg.setAttribute("width", String(size));
+      svg.setAttribute("height", String(size));
+      svg.setAttribute("fill", "none");
+      svg.setAttribute("stroke", stroke);
+      svg.setAttribute("stroke-width", String(sw));
+      svg.setAttribute("stroke-linecap", "round");
+      svg.setAttribute("stroke-linejoin", "round");
+      for (const d of paths) {
+        const p = document.createElementNS(SVG_NS, "path");
+        p.setAttribute("d", d);
+        svg.appendChild(p);
+      }
+      svg.style.pointerEvents = "none";
+      return svg;
+    }
+
+    // Lucide icons
+    const PATH_REFRESH = ["M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8", "M21 3v5h-5"];
+    const PATH_BACK = ["M15 6l-6 6 6 6"];
+    const PATH_CHECK = ["M5 12l5 5L20 7"];
+    const PATH_GEAR = [
+      "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z",
+      "M9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0"
+    ];
+
+    // ---- main view ----
     const numEl = el("div", "anki-num", "\u2026");
     const textEl = el("div", "anki-text");
     const labelEl = el("div", "anki-label", "due");
@@ -228,30 +403,40 @@
     textEl.appendChild(labelEl);
     textEl.appendChild(subEl);
 
-    // Lucide "rotate-cw"
-    const refreshBtn = el("button", "anki-refresh");
+    const actions = el("div", "anki-actions");
+    const gearBtn = el("button", "anki-btn anki-gear");
+    gearBtn.title = "Choose decks";
+    gearBtn.appendChild(svgIcon(PATH_GEAR, 10, COL_TEXT, 2));
+    const refreshBtn = el("button", "anki-btn anki-refresh");
     refreshBtn.title = "Refresh";
-    (function () {
-      const svg = document.createElementNS(SVG_NS, "svg");
-      svg.setAttribute("viewBox", "0 0 24 24");
-      svg.setAttribute("width", "12");
-      svg.setAttribute("height", "12");
-      svg.setAttribute("fill", "none");
-      svg.setAttribute("stroke", COL_TEXT);
-      svg.setAttribute("stroke-width", "2");
-      svg.setAttribute("stroke-linecap", "round");
-      svg.setAttribute("stroke-linejoin", "round");
-      for (const d of ["M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8", "M21 3v5h-5"]) {
-        const p = document.createElementNS(SVG_NS, "path");
-        p.setAttribute("d", d);
-        svg.appendChild(p);
-      }
-      refreshBtn.appendChild(svg);
-    })();
+    refreshBtn.appendChild(svgIcon(PATH_REFRESH, 10, COL_TEXT, 2));
+    actions.appendChild(gearBtn);
+    actions.appendChild(refreshBtn);
 
     widgetDiv.appendChild(numEl);
     widgetDiv.appendChild(textEl);
-    widgetDiv.appendChild(refreshBtn);
+    widgetDiv.appendChild(actions);
+
+    // ---- settings panel (deck selection) ----
+    const panel = el("div", "anki-panel");
+    panel.id = "anki-settings";
+    const head = el("div", "anki-panel-head");
+    const backBtn = el("button", "anki-btn");
+    backBtn.title = "Back";
+    backBtn.appendChild(svgIcon(PATH_BACK, 10, COL_TEXT, 3));
+    head.appendChild(backBtn);
+    head.appendChild(el("div", "anki-panel-title", "Decks"));
+    head.appendChild(el("div"));
+    const listEl = el("div", "anki-list");
+    const foot = el("div", "anki-foot");
+    const footCount = el("span");
+    const showAllBtn = el("button", "anki-pill", "Show all");
+    foot.appendChild(footCount);
+    foot.appendChild(showAllBtn);
+    panel.appendChild(head);
+    panel.appendChild(listEl);
+    panel.appendChild(foot);
+    widgetDiv.appendChild(panel);
 
     // =================== DATA ===================
     async function loadCounts() {
@@ -260,31 +445,33 @@
       if ((res.headers.get("content-type") || "").includes("text/html")) return { state: "login" };
       if (!res.ok) throw new Error("HTTP " + res.status);
       const decks = parseDeckList(new Uint8Array(await res.arrayBuffer()));
-      return {
-        state: "ok",
-        at: Date.now(),
-        decks,
-        due: decks.reduce((n, d) => n + d.due, 0),
-        fresh: decks.reduce((n, d) => n + d.fresh, 0),
-      };
+      return { state: "ok", at: Date.now(), decks };
     }
 
     // =================== RENDER ===================
     let lastGood = null;
+    let shown = null;
+    let shownStale = false;
 
     function render(r, stale) {
+      shown = r;
+      shownStale = !!stale;
       widgetDiv.dataset.stale = stale ? "1" : "";
       if (r.state === "ok") {
-        widgetDiv.dataset.state = r.due === 0 ? "done" : "ok";
-        numEl.textContent = String(r.due);
+        const t = totals(r.decks);
+        widgetDiv.dataset.state = t.due === 0 ? "done" : "ok";
+        numEl.textContent = String(t.due);
         labelEl.textContent = "due";
-        subEl.textContent = r.fresh ? "+" + r.fresh + " new" : (r.due === 0 ? "all done" : "");
+        subEl.textContent = t.fresh ? "+" + t.fresh + " new" : (t.due === 0 ? "all done" : "");
         const lines = r.decks
-          .filter((d) => d.due || d.fresh)
-          .map((d) => d.name + ": " + d.due + (d.fresh ? " (+" + d.fresh + " new)" : ""));
+          .map((d) => ({ name: d.name, e: effective(d) }))
+          .filter((x) => x.e.due || x.e.fresh)
+          .map((x) => x.name + ": " + x.e.due + (x.e.fresh ? " (+" + x.e.fresh + " new)" : ""));
+        const hidden = flatten(r.decks, []).filter((d) => excluded.has(d.path)).length;
         let when = "";
         try { when = new Date(r.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); } catch (e) {}
-        widgetDiv.title = ["Due: " + r.due + ", new: " + r.fresh + (when ? " (updated " + when + ")" : "")]
+        widgetDiv.title = ["Due: " + t.due + ", new: " + t.fresh + (when ? " (updated " + when + ")" : "")]
+          .concat(hidden ? ["Hidden decks: " + hidden] : [])
           .concat(lines)
           .concat(stale ? ["", "Could not refresh, showing the last values."] : [])
           .join("\n");
@@ -303,12 +490,77 @@
       }
     }
 
+    // ---- settings panel rendering ----
+    function buildRow(d, depth, off, locked) {
+      const row = el("div", "anki-row");
+      if (off || locked) row.classList.add("anki-off");
+      if (locked) row.classList.add("anki-locked");
+      row.style.paddingLeft = (5 + depth * 10) + "px";
+      const chk = el("span", "anki-check");
+      if (!off && !locked) chk.classList.add("anki-on");
+      chk.appendChild(svgIcon(PATH_CHECK, 9, COL_BG, 3.5));
+      const leaf = (d.path || d.name || "(unnamed)").split("::").pop();
+      const name = el("span", "anki-row-name", leaf);
+      row.title = d.path || leaf;
+      row.appendChild(chk);
+      row.appendChild(name);
+      row.appendChild(el("span", "anki-row-count", String(d.due)));
+      row.addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggleDeck(d.path);
+      });
+      return row;
+    }
+
+    function addRows(decks, depth, locked) {
+      for (const d of decks) {
+        const off = excluded.has(d.path);
+        listEl.appendChild(buildRow(d, depth, off, locked));
+        addRows(d.children, depth + 1, locked || off);
+      }
+    }
+
+    function renderSettings() {
+      if (!widgetDiv.classList.contains("anki-settings-open")) return;
+      const decks = lastGood ? lastGood.decks : [];
+      const scroll = listEl.scrollTop;
+      listEl.textContent = "";
+      if (!decks.length) {
+        listEl.appendChild(el("div", "anki-empty", "No decks yet.\nLog in to AnkiWeb and press refresh."));
+      } else {
+        addRows(decks, 0, false);
+      }
+      listEl.scrollTop = scroll;
+      const hidden = flatten(decks, []).filter((d) => excluded.has(d.path)).length;
+      footCount.textContent = hidden ? hidden + " hidden" : "All decks counted";
+      showAllBtn.style.display = hidden ? "" : "none";
+    }
+
+    function rerender() {
+      if (shown && shown.state === "ok") render(shown, shownStale);
+      renderSettings();
+    }
+
+    function toggleDeck(path) {
+      if (excluded.has(path)) excluded.delete(path);
+      else excluded.add(path);
+      saveExcluded();
+      rerender();
+    }
+
+    function setSettingsOpen(open) {
+      widgetDiv.classList.toggle("anki-settings-open", open);
+      if (open) renderSettings();
+    }
+
+    // =================== REFRESH ===================
     let busy = false;
     let lastRun = 0;
     let lastOk = false;
 
-    async function refresh() {
-      if (busy) return;
+    // manual = the person pressed the button: runs even if the window looks hidden
+    async function refresh(manual) {
+      if (busy || (!manual && windowHidden())) return;
       busy = true;
       widgetDiv.classList.add("anki-loading");
       try {
@@ -326,6 +578,7 @@
         busy = false;
         widgetDiv.classList.remove("anki-loading");
       }
+      renderSettings();
       if (!widgetDiv.isConnected) mountWidget();
     }
 
@@ -350,12 +603,27 @@
 
     widgetDiv.addEventListener("click", (e) => {
       if (e.button !== 0) return;
-      if (e.target.closest && e.target.closest(".anki-refresh")) return;
+      if (widgetDiv.classList.contains("anki-settings-open")) return;
+      if (e.target.closest && e.target.closest(".anki-actions")) return;
       openAnkiWeb();
     });
     refreshBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      refresh();
+      refresh(true);
+    });
+    gearBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setSettingsOpen(true);
+    });
+    backBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setSettingsOpen(false);
+    });
+    showAllBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      excluded.clear();
+      saveExcluded();
+      rerender();
     });
 
     // =================== MOUNTING (same spot as the SoundCloud widget) ===================
@@ -410,20 +678,35 @@
       }, 500);
     }
 
-    setInterval(() => {
-      if (!document.hidden) refresh();
-    }, REFRESH_MS);
+    // refresh() itself skips automatic runs while the window is minimised/hidden
+    setInterval(() => refresh(false), REFRESH_MS);
 
-    // Coming back to the window (e.g. after syncing on the phone): refresh if stale.
+    // Coming back to the window (restored from minimised, or after syncing on
+    // the phone): refresh if the numbers are stale.
     function refreshIfStale() {
-      if (document.hidden) return;
+      if (windowHidden()) return;
       const limit = lastOk ? STALE_MS : RETRY_MS;
-      if (Date.now() - lastRun > limit) refresh();
+      if (Date.now() - lastRun > limit) refresh(false);
     }
     document.addEventListener("visibilitychange", refreshIfStale);
     window.addEventListener("focus", refreshIfStale);
+    window.addEventListener("sizemodechange", refreshIfStale);
 
-    refresh();
+    // Keep several windows in sync when the deck selection changes.
+    const prefObserver = {
+      observe() {
+        loadExcluded();
+        rerender();
+      }
+    };
+    try {
+      Services.prefs.addObserver(PREFIX + "excluded", prefObserver);
+      window.addEventListener("unload", () => {
+        try { Services.prefs.removeObserver(PREFIX + "excluded", prefObserver); } catch (e) {}
+      }, { once: true });
+    } catch (e) {}
+
+    refresh(false);
 
     // Don't draw over the urlbar results panel
     try {
