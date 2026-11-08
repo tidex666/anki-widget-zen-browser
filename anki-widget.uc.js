@@ -7,6 +7,11 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v1.3.2
+//  - Same footprint as the minimised SoundCloud player: 40px high (6px
+//    padding, like the mini player), right-hand icon column lined up with the
+//    player's expand button. Gear and refresh now sit side by side (a 40px
+//    bar has no room for them stacked) and replace the card glyph on hover.
 // v1.3.1
 //  - Widget has a fixed minimum height (46px) in every state, so the stacked
 //    gear/refresh buttons that appear on hover have room above and below
@@ -43,7 +48,7 @@
 (() => {
   "use strict";
 
-  const ANKI_WIDGET_VERSION = "1.3.1";
+  const ANKI_WIDGET_VERSION = "1.3.2";
   const ENDPOINT = "https://ankiweb.net/svc/decks/deck-list-info";
   const DECKS_PAGE = "https://ankiweb.net/decks";
 
@@ -233,7 +238,7 @@
         position: relative; display: flex; align-items: center; gap: 10px;
         flex-shrink: 0; min-width: 0; max-width: calc(100% - 16px);
         contain: inline-size; overflow: hidden;
-        margin: 6px 8px 8px; padding: 8px 12px; box-sizing: border-box; min-height: 46px;
+        margin: 6px 8px 8px; padding: 6px 8px 6px 12px; box-sizing: border-box; min-height: 40px;
         -moz-window-dragging: no-drag; cursor: pointer;
         background: transparent;
         backdrop-filter: blur(14px) saturate(160%);
@@ -266,7 +271,7 @@
       #anki-widget::before { transition: background-color 0.15s ease; }
       #anki-widget:hover::before { background: rgba(255, 255, 255, 0.20); }
       #anki-widget.anki-narrow { display: none !important; }
-      #anki-widget.anki-settings-open { cursor: default; }
+      #anki-widget.anki-settings-open { cursor: default; padding: 8px 12px; }
 
       /* ---- main view ---- */
       #anki-widget.anki-settings-open .anki-num,
@@ -286,13 +291,15 @@
       #anki-widget .anki-label { color: ${COL_TEXT_DIM}; }
       #anki-widget .anki-sub { color: ${COL_TEXT_FAINT}; }
       #anki-widget .anki-label,
-      #anki-widget .anki-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+      #anki-widget .anki-sub {
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; line-height: 1.15;
+      }
       #anki-widget .anki-sub:empty { display: none; }
 
       /* No "+N new" line: put the label on the baseline of the number ("102 due"). */
-      /* (extra vertical padding keeps the line centred in the 46px minimum height) */
+      /* (extra vertical padding keeps the line centred in the 40px minimum height) */
       #anki-widget.anki-single:not(.anki-settings-open) {
-        align-items: baseline; padding-top: 12px; padding-bottom: 12px;
+        align-items: baseline; padding-top: 9px; padding-bottom: 9px;
       }
 
       /* flashcard glyph at the right edge; swaps with the buttons on hover */
@@ -314,14 +321,19 @@
       #anki-widget .anki-btn:hover { background-color: ${COL_SELECTION}; }
       #anki-widget .anki-btn:active { transform: scale(0.92); }
 
-      /* gear + refresh: stacked at the right edge, only visible on hover */
+      /* gear + refresh: side by side at the right edge, only visible on hover.
+         They are wider than the glyph they replace, so on hover the end of the
+         text fades out under them (no layout shift). */
+      #anki-widget:hover .anki-text {
+        mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent calc(100% - 10px));
+      }
       #anki-widget .anki-actions {
-        position: absolute; right: 13px; top: 50%; transform: translateY(-50%);
-        display: flex; flex-direction: column; gap: 2px;
+        position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+        display: flex; flex-direction: row; gap: 4px;
         opacity: 0; pointer-events: none; transition: opacity 0.15s ease;
       }
       #anki-widget:hover .anki-actions { opacity: 1; pointer-events: auto; }
-      #anki-widget .anki-actions .anki-btn { width: 16px; height: 16px; }
+      #anki-widget .anki-actions .anki-btn { width: 18px; height: 18px; }
       #anki-widget.anki-loading .anki-refresh svg { animation: anki-spin 0.9s linear infinite; }
       @keyframes anki-spin { to { transform: rotate(360deg); } }
 
